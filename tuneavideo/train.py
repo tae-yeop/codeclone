@@ -35,4 +35,10 @@ def main(
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
     unet.requires_grad_(False)
+    for name, module in unet.named_modules():
+        if name.endswith(tuple(trainable_modules)):
+            for params in module.parameters():
+                params.requires_grad = True
+
+
     
