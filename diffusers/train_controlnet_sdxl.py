@@ -8,6 +8,12 @@ import random
 import shutil
 from pathlib import Path
 
+import numpy as np
+import accelerate
+import torch
+import torch.nn.functional as F
+import torch.utils.checkpoint
+import transformers
 
 from diffusers import (
     AutoencoderKL,
@@ -20,6 +26,7 @@ from diffusers import (
 
 from transformers import AutoTokenizer, PretrainedConfig
 
+# SDXLPL에서 쓰는 방식으로
 def encode_prompt(prompt_batch,
                   text_encoders,
                   tokenizers,
@@ -29,7 +36,29 @@ def encode_prompt(prompt_batch,
 
     captions = []
     for caption in prompt_batch:
-        ...
+        # 랜덤하게 
+        if random.random() < proportion_empty_propmts:
+            captions.append("")
+        elif isinstance(caption, str):
+            captions.append(caption)
+        elif isinstance(caption, (list, np.ndarray)):
+            # 여기서 random.choice?
+            captions.append(random.choice(caption) if is_train else caption[0])
+
+    with torch.no_grad():
+        for tokenizer, text_encoder in zip(tokenizers, text_encoders):
+            text_inputs = tokenizer(captions,
+                                    padding='max_length',
+                                    max_length=tokenizer.model_max_length,
+                                    truncation=True,
+                                    return_tensors='pt')
+            text_input_ids = text_inputs.input_ids
+            prompt_embeds = text_encoder(text_input_ids.to(text_encoder.device),
+                                         output_hidden_states=True)
+            pooled_prompt_embeds = prompt_embeds[0]
+            prompt_embeds = prompt_embeds.hidden_states[-2]
+            bs_embed, seq_len, _ = prompt_embeds.shape
+            
 
     
 

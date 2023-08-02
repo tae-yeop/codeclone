@@ -18,17 +18,37 @@ from einops import rearrange, repeat
 class TemporalTransformer3DModelOutput(BaseOutput):
     sample: torch.FloatTensor
 
+def get_motion_module(
+    in_channels,
+    motion_module_type:str,
+    motion_module_kwargs:dict
+):
+    if motion_module_type == 'Vanilla':
+        return VanillaTemporalModule(in_channels=in_channels,
+                                     **motion_module_kwargs)
+    else:
+        raise ValueError
+
     
 class VanillaTemporalModule(nn.Module):
     def __init__(
         self,
         in_channels,
         num_attention_heads = 8,
-        zero_initialize = True,
+        num_transformer_block=2,
+        attention_block_types=("Temporal_Self", "Temporal_Self"),
+        cross_frame_attention_mode=None,
+        temporal_position_encoding=False,
+        temporal_position_encoding_max_len = 24,
+        temporal_attention_dim_div         = 1,
+        zero_initialize                    = True,
     ):
         super().__init__()
 
-        self.temporal_transformer = TemporalTransformer3DModle()
+        self.temporal_transformer = TemporalTransformer3DModel(
+            in_channels=in_channels,
+            num_attention_heads=
+        )
 
         if zero_initialize:
             self.temporal_transformer.proj_out = zero_module(self.temporal_transformer.proj_out)
