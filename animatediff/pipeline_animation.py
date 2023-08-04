@@ -21,6 +21,8 @@ from diffusers.schedulers import (
     PNDMScheduler,
 )
 
+from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
+
 @dataclass
 class AnimationPipelineOutput(BaseOutput):
     videos: Union[torch.Tensor, np.ndarray]
@@ -35,7 +37,9 @@ class AnimationPipeline(DiffusionPipeline):
                  text_encoder,
                  tokenizer,
                  unet,
-                 scheduler):
+                 scheduler,
+                 # feature_extractor:CLIPImageProcessor
+                 ):
         super.__init__()
 
         # SDPL와 동일, 차이점은 safety_checker, feature_extractor 없음
@@ -119,6 +123,7 @@ class AnimationPipeline(DiffusionPipeline):
         for cpu_offloaded_model in [self.unet, self.text_encoder, self.vae]:
             if cpu_offloaded_model is not None:
                 cpu_offload(cpu_offloaded_model, device)
+                
     # DiffusinPipelne과 조금 다르다
     @property
     def _execution_device(self):
@@ -156,7 +161,7 @@ class AnimationPipeline(DiffusionPipeline):
 
 
         # 0. Default height and width to unet
-        # scale_factor가 사이즈 조절 factor인듯
+        # scale_factor를 통해 vae latent space맞는 사이즈를 갖도록 
         height = height or self.unet.config.sample_size * self.vae_scale_factor
         width = width or self.unet.config.sample_size * self.vae_scale_factor
 
@@ -166,6 +171,7 @@ class AnimationPipeline(DiffusionPipeline):
 
 
         # 2. Define call parameters
+        # 기본적으로 하나만 만들되 prompt 갯수대로
         batch_size = 1
         if latents is not None:
             batch_size = latents.shape[0]
@@ -177,7 +183,7 @@ class AnimationPipeline(DiffusionPipeline):
 
         # 3. Encode input prompt
         prompt = prompt if isinstance(prompt, list) else [prompt] * batch_size
-        # negative 여러번
+        # negative 여러번 반복해서 생성할 prompt 갯수와 비율을 맞춤
         if negative_prompt is not None:
             negative_prompt = negative_prompt if isinstance(negative_prompt, list) else [negative_prompt] * batch_size
         # lora scale은 반영하지 않는다 : text_encoder_lora_scale
@@ -202,7 +208,7 @@ class AnimationPipeline(DiffusionPipeline):
                                        device,
                                        generator,
                                        latents)
-        # latent type을 따로 저장함
+        # latent type을 따로 저장해두고 noise_pred와 type을 맞춤
         latents_dtype = latents.dtype
 
         # 6. Prepare extra step kwargs

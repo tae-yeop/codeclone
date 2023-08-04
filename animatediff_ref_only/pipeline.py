@@ -23,6 +23,7 @@ from diffusers.models import AutoencoderKL
 from ..models.unet import UNet3DConditionModel # AnimateDiff 모델
 from transformers import CLIPTextModel, CLIPTokenizer
 
+from einops import rearrange
 
 def torch_dfs(model: torch.nn.Module):
     result = [model]
@@ -275,17 +276,83 @@ class AnimationReferencePipeline(DiffusionPipeline):
 
         # 9. Modify self attention and group norm
         MODE = 'write'
-        uc_mask = ()
+        uc_mask = (
+            torch.Tensor([1] * batch_size * num_images_per_prompt + [0] * batch_size * num_images_per_prompt)
+            .type_as(ref_image_latents)
+            .bool()
+        )
 
         def hacked_basic_transformer_inner_forward(self, 
                                                    hidden_states: torch.FloatTensor,
+                                                   attention_mask:Optional[torch.FloatTensor]=None,
+                                                   encoder_hidden_states:Optional[torch.FloatTensor]=None,
+                                                   encoder_attention_mask: Optional[torch.FloatTensor] = None,
+                                                   timestep: Optional[torch.LongTensor] = None,
+                                                   cross_attention_kwargs: Dict[str, Any] = None,
+                                                   class_labels: Optional[torch.LongTensor] = None,
                                                    ):
             """
             첫번째 SA 리코딩
             animatediff에서 사용되는 basic_transformer는 : Transformer3DModel안에 있는 BasicTransformerBlock
             """
-            if self.use_
-            ...
+            if self.use_ada_layer_norm:
+                norm_hidden_states = self.norm1(hidden_states, timestep)
+            else:
+                norm_hidden_states = self.norm1(hidden_states)
+
+            # SA
+            if MODE == 'write':
+                self.bank.append(norm_hidden_states.detach().clone())
+                attn_output = self.attn1(
+                    norm_hidden_states,
+                    encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None,
+                    attention_mask=attention_mask,
+                    **cross_attention_kwargs,)
+
+            if MODE =='read':
+                if attention_auto_machine_weight > self.attn_weight:
+                    attn_output_uc = self.attn1(norm_hidden_states,
+                                                encoder_hidden_states=torch.cat([norm_hidden_states]+self.bank, dim=1),
+                                                **cross_attention_kwargs,)
+                    attn_output_c = attn_output_uc.clone() 
+                    if do_classifier_free_guidance and style_fidelity > 0:
+                        attn_output_uc[uc_mask] = self.attn1(
+                            norm_hidden_states[uc_mask],
+                            encoder_hidden_states=norm_hidden_states[uc_mask],
+                            **cross_attention_kwargs,
+                        )
+                    attn_output = style_fidelity * attn_output_c + (1.0 - style_fidelity) * attn_output_uc
+                    self.bank.clear()
+
+                else:
+                    attn_output = self.attn1(
+                        norm_hidden_states,
+                        encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None,
+                        attention_mask=attention_mask,
+                        **cross_attention_kwargs,
+                    )
+
+            hidden_states = attn_output + hidden_states
+            # CA
+            if self.attn2 is not None:
+                norm_hidden_states = (
+                    self.norm2(hidden_states, timestep) if self.use_ada_layer_norm else self.norm2(hidden_states)
+                )
+                attn_output = self.attn2(
+                    norm_hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    attention_mask=encoder_attention_mask,
+                    **cross_attention_kwargs,
+                )
+                hidden_states = attn_output + hidden_states
+
+            # FF
+            norm_hidden_states = self.norm3(hidden_states)
+            ff_output = self.ff(norm_hidden_states)
+            hidden_states = ff_output + hidden_states
+
+            return hidden_states
+        
         def hacked_mid_forward(self, *args, **kwargs):
             ...
         
@@ -301,11 +368,34 @@ class AnimationReferencePipeline(DiffusionPipeline):
             ...
 
         if reference_attn:
-            # UNet에 있는 모든 BasicTransformerBlock에 대해서
-            attn_modules = [module for module in torch_dfs(self.unet) if isinstance(module, )]
+            # UNet에 있는 모든 BasicTransformerBlock에 대해서...
+            # 사실상 BaisicTransformerBlock은 동일함
+            attn_modules = [module for module in torch_dfs(self.unet) if isinstance(module, BasicTransformerBlock)]
+            attn_modules = sorted(attn_modules, key=lambda x: -x.norm1.normalized_shape[0])
+
+            for i, module in enumerate(attn_modules):
+                module._original_inner_forward = module.forward
+                module.forward = hacked_basic_transformer_inner_forward.__get__(module, BasicTransformerBlock)
+                module.bank = []
+                module.attn_weight = float(i) / float(len(attn_modules))
+
+                
         if reference_adain:
-            ...
-        # 10. 
+            pass
+        
+        # 10. Denoising loop
+        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(timesteps):
+                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+
+                # reference
+                noise = randn_tensor(
+                    ref_image_latents.shape, generator=generator, device=device, dtype=ref_image_latents.dtype
+                )
+                
 
     def _default_height_width(self, height, width, image):
         # from reference_only
@@ -426,6 +516,8 @@ class AnimationReferencePipeline(DiffusionPipeline):
 
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
+
+        # [B, C, F, H, W]
         return latents
 
     def prepare_ref_latents(self, refimage, batch_size, dtype, device, 
@@ -464,4 +556,23 @@ class AnimationReferencePipeline(DiffusionPipeline):
         # aligning device to prevent device errors when concating it with the latent model input
         ref_image_latents = ref_image_latents.to(device=device, dtype=dtype)
         return ref_image_latents
-    
+
+
+
+    def decode_latents(self, latents):
+        video_length = latents.shape[2]
+        latents = 1 / 0.
+        latents = 1 / self.vae.config.scaling_factor * latents
+        # batchfiy
+        latents = rearrange(latents, "b c f h w -> (b f) c h w")
+
+        video = []
+        for frame_idx in range(latents.shape[0]):
+            video.append(self.vae.decode(latents[frame_idx: frame_idx+1].to(self.vae.device, self.vae.dtype)).sample)
+
+        video = torch.cat(video)
+        video = rearrange(video, "(b f) c h w -> b c f h w", f=video_length)
+        video = (video / 2 + 0.5).clamp(0, 1)
+        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+        video = video.cpu().float().numpy()
+        return video
