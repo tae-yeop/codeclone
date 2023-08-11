@@ -500,7 +500,7 @@ class StableDiffusionReferencePipeline(StableDiffusionPipeline):
                 module.var_bank = []
                 module.gn_weight *= 2
 
-        # 9. Denosing loop 기본 SDPL과 똑같은듯?
+        # 10. Denosing loop 기본 SDPL과 똑같은듯?
         # self.scheduler.order는 무엇일까?
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         with self.progress_bar(total=num_inference_steps) as progress_Bar:

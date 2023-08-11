@@ -283,6 +283,7 @@ class AnimationReferencePipeline(DiffusionPipeline):
             """
             첫번째 SA 리코딩
             animatediff에서 사용되는 basic_transformer는 : Transformer3DModel안에 있는 BasicTransformerBlock
+            기존 UNet 순서 : norm -> SA -> norm -> CA // 여기서 SA만 bank에 넣음, CA는 그대로 흘려보냄
             """
             if self.use_
             ...
@@ -301,8 +302,17 @@ class AnimationReferencePipeline(DiffusionPipeline):
             ...
 
         if reference_attn:
-            # UNet에 있는 모든 BasicTransformerBlock에 대해서
+            # UNet에 있는 모든 BasicTransformerBlock에 대해서 SA 값을 저장하기
             attn_modules = [module for module in torch_dfs(self.unet) if isinstance(module, )]
+
+            attn_modules = [module for module in torch_dfs(self.unet) if isinstance(module, BasicTransformerBlock)]
+            attn_modules = sorted(attn_modules, key=lambda x: -x.norm1.normalized_shape[0])
+
+            for i, module in enumerate(attn_modules):
+                module._original_inner_forward = module.forward
+                module.forward = hacked_basic_transformer_inner_forward.__get__(module, BasicTransformerBlock)
+                module.bank = []
+                module.attn_weight = float(i) / float(len(attn_modules))
         if reference_adain:
             ...
         # 10. 
