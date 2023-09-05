@@ -188,14 +188,13 @@ if accelerator.is_main_process:
         lora_config["peft_config"] = unwarpped_unet.get_peft_config_as_dict(inference=True)
         
         if args.train_text_encoder:
-            unwarpped_text_encoder = accelerator.unwrap_model(text_encoder)
+            unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
             text_encoder_state_dict = get_peft_model_state_dict(
                     unwarpped_text_encoder, state_dict=accelerator.get_state_dict(text_encoder)
                 )
             text_encoder_state_dict = {f"text_encoder_{k}": v for k, v in text_encoder_state_dict.items()}
-
-
-            
+            state_dict.update(text_encoder_state_dict)
+            lora_config["text_encoder_peft_config"] = unwrapped_text_encoder.get_peft_conifg_as_dict(inference=True)
         accelerator.save(state_dict, os.path.join(args.output_dir, f"{global_step}_lora.pt"))
         with open(os.path.join(args.output_dir, ))
 
