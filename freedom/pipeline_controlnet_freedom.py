@@ -10,10 +10,9 @@ import torch
 import torch.nn.functional as F
 from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
 
-from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
+from diffusers.image_processor import VaeImageProcessor
 from diffusers.loaders import FromSingleFileMixin, LoraLoaderMixin, TextualInversionLoaderMixin
 from diffusers.models import AutoencoderKL, ControlNetModel, UNet2DConditionModel
-from diffusers.models.lora import adjust_lora_scale_text_encoder
 from diffusers.schedulers import KarrasDiffusionSchedulers
 from diffusers.utils import (is_accelerate_available,
     is_accelerate_version,
@@ -28,8 +27,8 @@ from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionS
 from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
 
 from diffusers.utils import BaseOutput, randn_tensor
-from .arcface.model import IDLoss
-from .face_id_utils import get_tensor_M
+from arcface.model import IDLoss
+from face_id_utils import get_tensor_M
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -77,16 +76,15 @@ class StableDiffusionControlNetFreedomPipeline(
             controlnet=controlnet,
             scheduler=scheduler,
             safety_checker=safety_checker,
-            feature_extractor=feature_extractor,
-            freedom_energy_guide=freedom_energy_guide
+            feature_extractor=feature_extractor
         )
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True)
         self.control_image_processor = VaeImageProcessor(
             vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True, do_normalize=False
         )
+        self.freedom_energy_guide = freedom_energy_guide
         self.register_to_config(requires_safety_checker=requires_safety_checker)
-
 
     def encode_prompt(
         self,
@@ -103,9 +101,6 @@ class StableDiffusionControlNetFreedomPipeline(
         # function of text encoder can correctly access it
         if lora_scale is not None and isinstance(self, LoraLoaderMixin):
             self._lora_scale = lora_scale
-
-            # dynamically adjust the LoRA scale
-            adjust_lora_scale_text_encoder(self.text_encoder, lora_scale)
 
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
@@ -272,7 +267,7 @@ class StableDiffusionControlNetFreedomPipeline(
         # [batch_size * cfg_2, 3, height, weight], 범위는 0~1사이값
         return image
         
-    def prepare_latent(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
+    def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
         shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
@@ -292,7 +287,14 @@ class StableDiffusionControlNetFreedomPipeline(
     def __call__(
         self,
         prompt, # prompt 
-        image: PipelineImageInput = None, # condition image -> controlnet
+        image: Union[
+            torch.FloatTensor,
+            PIL.Image.Image,
+            np.ndarray,
+            List[torch.FloatTensor],
+            List[PIL.Image.Image],
+            List[np.ndarray],
+        ] = None, # condition image -> controlnet
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 50,
@@ -316,7 +318,15 @@ class StableDiffusionControlNetFreedomPipeline(
         repeat: int = 1,
         freedom_start: int = 40,
         freedom_end: int = -10,
-        reference_img: PipelineImageInput = None,
+        reference_img: Union[
+            torch.FloatTensor,
+            PIL.Image.Image,
+            np.ndarray,
+            List[torch.FloatTensor],
+            List[PIL.Image.Image],
+            List[np.ndarray],
+        ] = None,
+        reference_img_path: str = None,
         strength: float = 1.0
         ):
 
@@ -349,7 +359,7 @@ class StableDiffusionControlNetFreedomPipeline(
         controlnet = self.controlnet._orig_mod if is_compiled_module(self.controlnet) else self.controlnet
 
         # align format for control guidance
-        if not isinstance(control_guidance_start, list) :
+        if not isinstance(control_guidance_start, list) and isinstance(control_guidance_end, list):
             control_guidance_start = len(control_guidance_end) * [control_guidance_start]
         elif not isinstance(control_guidance_end, list) and isinstance(control_guidance_start, list):
             control_guidance_end = len(control_guidance_start) * [control_guidance_end]
@@ -389,7 +399,7 @@ class StableDiffusionControlNetFreedomPipeline(
 
         # 3. Encode input prompt
         text_encoder_lora_scale = (cross_attention_kwargs.get("scale", None) if cross_attention_kwargs is not None else None)
-        prompt_embeds = self.encode_prompt(
+        prompt_embeds, negative_prompt_embeds = self.encode_prompt(
             prompt,
             device,
             num_images_per_prompt,
@@ -403,7 +413,12 @@ class StableDiffusionControlNetFreedomPipeline(
         # Here we concatenate the unconditional and text embeddings into a single batch
         # to avoid doing two forward passes
         if do_classifier_free_guidance:
+            print(type(negative_prompt_embeds))
+            print(type(prompt_embeds))
+            print(negative_prompt_embeds.shape)
+            print(prompt_embeds.shape)
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+        
 
         # 4. prepare image
         # condition 이미지를 전처리하는 부분
@@ -489,15 +504,16 @@ class StableDiffusionControlNetFreedomPipeline(
             controlnet_keep.append(keeps[0] if isinstance(controlnet, ControlNetModel) else keeps)
 
 
-        # 7.2 reference image 
-        M = get_tensor_M(reference_path)
-        self.grid = F.affine_grid(M, (1, 3, 256, 256), align_corners=True)
-
+        # 7.2 reference image
+        if isinstance(self.freedom_energy_guide, IDLoss):
+            M = get_tensor_M(reference_img_path)
+            grid = F.affine_grid(M, (1, 3, 256, 256), align_corners=True)
+            intermediates = {'x_inter': [latents], 'pred_x0': [latents]}
+        else:
+            ...
             
-        
         # 8. Denosing loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-        intermediates = {'x_inter': [img], 'pred_x0': [img]}
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # Prepare computing energy guidance
@@ -524,7 +540,10 @@ class StableDiffusionControlNetFreedomPipeline(
                     if isinstance(controlnet_keep[i], list):
                         cond_scale = [c * s for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])]
                     else:
-                        cond_scale = controlnet_conditioning_scale * controlnet_keep[i]
+                        controlnet_cond_scale = controlnet_conditioning_scale
+                        if isinstance(controlnet_cond_scale, list):
+                            controlnet_cond_scale = controlnet_cond_scale[0]
+                        cond_scale = controlnet_cond_scale * controlnet_keep[i]
 
                     down_block_res_samples, mid_block_res_sample = self.controlnet(
                         control_model_input,
@@ -536,11 +555,23 @@ class StableDiffusionControlNetFreedomPipeline(
                         return_dict=False,
                     )
 
+                    if guess_mode and do_classifier_free_guidance:
+                        # Infered ControlNet only for the conditional batch.
+                        # To apply the output of ControlNet to both the unconditional and conditional batches,
+                        # add 0 to the unconditional batch to keep it unchanged.
+                        down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
+                        mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
 
-                    noise_pred = self.unet(latent_model_input,
-                                        t,
-                                        encoder_hidden_states=prompt_embed)
-                    
+                    # predict the noise residual
+                    noise_pred = self.unet(
+                        latent_model_input,
+                        t,
+                        encoder_hidden_states=prompt_embeds,
+                        cross_attention_kwargs=cross_attention_kwargs,
+                        down_block_additional_residuals=down_block_res_samples,
+                        mid_block_additional_residual=mid_block_res_sample,
+                        return_dict=False,
+                    )[0]
 
                     # CFG 처리
                     if do_classifier_free_guidance:
@@ -548,32 +579,29 @@ class StableDiffusionControlNetFreedomPipeline(
                         correction = noise_pred_text - noise_pred_uncond
                         noise_pred = noise_pred_uncond + guidance_scale * correction
 
+
                     alphas = self.scheduler.alphas_cumprod
-                    alphas_prev = ...
-                    sigmas = ...
-                    sqrt_one_minus_alphas = ...
+                    alphas_prev = torch.cat([torch.ones(1), self.scheduler.alphas_cumprod[:-1]], dim=0)
+                    sqrt_one_minus_alphas = np.sqrt(1. - self.scheduler.alphas_cumprod) 
+                    sigmas = eta * torch.sqrt((1 - alphas_prev) / (1 - alphas) * (1 - alphas / alphas_prev))
 
-
-                    a_t = torch.full((batch_size * num_images_per_prompt, 1, 1, 1))
-                    a_prev = torch.full((batch_size * num_images_per_prompt, 1, 1, 1), alphas_prev[t], device=device)
-
+                    # select parameters corresponding to the currently considered timestep
+                    a_t = torch.full((batch_size * num_images_per_prompt, 1, 1, 1), alphas[i])
+                    a_prev = torch.full((batch_size * num_images_per_prompt, 1, 1, 1), alphas_prev[i])
                     beta_t = a_t / a_prev
-                    sigma_t = torch.full((batch_size * num_images_per_prompt, 1, 1, 1), sigmas[t], device=device)
-                    sqrt_one_minus_at = torch.full((b, 1, 1, 1), sqrt_one_minus_alphas[t], device=device)
+                    sigma_t = torch.full((batch_size * num_images_per_prompt, 1, 1, 1), sigmas[i])
+                    sqrt_one_minus_at = torch.full((batch_size * num_images_per_prompt, 1, 1, 1), sqrt_one_minus_alphas[i])
 
-                    pred_x0 = (latents - sqrt_one_minus_at) / a_t.sqrt()
-
-                    # 실제론 False가 되서 실행 안됨
-                    if quantize_denoised:
-                        pred_x0, _, *_ = self.model.first_stage_model.quantize(pred_x0)
-
-                    # apply freedom guidaance
-                    if freedom_start > t >= freedom_end:
+                    pred_x0 = (latents - sqrt_one_minus_at * noise_pred) / a_t.sqrt()
+                    # apply freedom guidance
+                    if freedom_start > i >= freedom_end:
                         # 이미지 얻고
                         D_x0_t = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
                         # warping
-                        warp_D_x0_t = F.grid_sample(D_x0_t, self.grid, align_corners=True)
-                        residual = self.idloss.get_residual(warp_D_x0_t)
+                        warp_D_x0_t = F.grid_sample(D_x0_t, grid, align_corners=True)
+                        residual = self.freedom_energy_guide.get_residual(warp_D_x0_t, reference_img)
+                        print(reference_img.requires_grad)
+                        print(residual.requires_grad)
                         norm = torch.linalg.norm(residual)
                         norm_grad = torch.autograd.grad(outputs=norm, inputs=latents)[0]
                         rho = (correction * correction).mean().sqrt().item() * guidance_scale
@@ -583,14 +611,17 @@ class StableDiffusionControlNetFreedomPipeline(
                     c2 = (a_t / a_prev).sqrt() * (1 - a_prev) / (1 - a_t)
                     c3 = (1 - a_prev) * (1 - a_t / a_prev) / (1 - a_t)
                     c3 = (c3.log() * 0.5).exp()
-                    x_prev = c1 * pred_x0 + c2 * x + c3 * torch.randn_like(pred_x0)
-
-                    if end <= t < start:
+                    x_prev = c1 * pred_x0 + c2 * latents + c3 * torch.randn_like(pred_x0)
+                    
+                    if freedom_start > i >= freedom_end:
                         x_prev = x_prev - rho * norm_grad.detach()
 
                     # repeat_noise = False가 들어감
-                    x = beta_t.sqrt() * x_prev + (1 - beta_t).sqrt() * randn_tensor(x.shape)
+                    latents = beta_t.sqrt() * x_prev + (1 - beta_t).sqrt() * randn_tensor(latents.shape)
 
+                    # # 원래는 여기까지
+                    # # compute the previous noisy sample x_t -> x_t-1
+                    # latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
 
                 latents = x_prev.detach()
                 prev_x0_image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]

@@ -52,6 +52,7 @@ def align_and_save_dir(src_path, template_path='./pretrain_models/FFHQ_template.
     sp = dlib.shape_predictor('./pretrain_models/shape_predictor_5_face_landmarks.dat')
 
     img_path = src_path
+    # np.array [h, w, c]
     img = dlib.load_rgb_image(img_path)
 
     points, rec_list = get_points_and_rec(img, detector, sp)
