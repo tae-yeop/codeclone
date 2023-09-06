@@ -283,7 +283,7 @@ class StableDiffusionControlNetFreedomPipeline(
         latents = latents * self.scheduler.init_noise_sigma
         return latents
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def __call__(
         self,
         prompt, # prompt 
@@ -413,10 +413,6 @@ class StableDiffusionControlNetFreedomPipeline(
         # Here we concatenate the unconditional and text embeddings into a single batch
         # to avoid doing two forward passes
         if do_classifier_free_guidance:
-            print(type(negative_prompt_embeds))
-            print(type(prompt_embeds))
-            print(negative_prompt_embeds.shape)
-            print(prompt_embeds.shape)
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
         
 
@@ -506,8 +502,10 @@ class StableDiffusionControlNetFreedomPipeline(
 
         # 7.2 reference image
         if isinstance(self.freedom_energy_guide, IDLoss):
+            self.freedom_energy_guide = self.freedom_energy_guide.to(device)
             M = get_tensor_M(reference_img_path)
-            grid = F.affine_grid(M, (1, 3, 256, 256), align_corners=True)
+            grid = F.affine_grid(M, (1, 3, 256, 256), align_corners=True).to(device)
+            # print(grid.device)
             intermediates = {'x_inter': [latents], 'pred_x0': [latents]}
         else:
             ...
@@ -517,10 +515,10 @@ class StableDiffusionControlNetFreedomPipeline(
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # Prepare computing energy guidance
-                latents.requires_grad_ = True
+                latents.requires_grad = True
                 self.unet.requires_grad_(True)
                 self.controlnet.requires_grad_(True)
-
+                print('latents', latents.requires_grad_)
                 for j in range(repeat):
                     # expand the latents if we are doing classifier free guidance
                     latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
@@ -582,16 +580,17 @@ class StableDiffusionControlNetFreedomPipeline(
 
                     alphas = self.scheduler.alphas_cumprod
                     alphas_prev = torch.cat([torch.ones(1), self.scheduler.alphas_cumprod[:-1]], dim=0)
-                    sqrt_one_minus_alphas = np.sqrt(1. - self.scheduler.alphas_cumprod) 
+                    sqrt_one_minus_alphas = np.sqrt(1. - self.scheduler.alphas_cumprod)
                     sigmas = eta * torch.sqrt((1 - alphas_prev) / (1 - alphas) * (1 - alphas / alphas_prev))
 
                     # select parameters corresponding to the currently considered timestep
-                    a_t = torch.full((batch_size * num_images_per_prompt, 1, 1, 1), alphas[i])
-                    a_prev = torch.full((batch_size * num_images_per_prompt, 1, 1, 1), alphas_prev[i])
+                    a_t = torch.full((batch_size * num_images_per_prompt, 1, 1, 1), alphas[i]).to(device)
+                    a_prev = torch.full((batch_size * num_images_per_prompt, 1, 1, 1), alphas_prev[i]).to(device)
                     beta_t = a_t / a_prev
                     sigma_t = torch.full((batch_size * num_images_per_prompt, 1, 1, 1), sigmas[i])
-                    sqrt_one_minus_at = torch.full((batch_size * num_images_per_prompt, 1, 1, 1), sqrt_one_minus_alphas[i])
-
+                    sqrt_one_minus_at = torch.full((batch_size * num_images_per_prompt, 1, 1, 1), sqrt_one_minus_alphas[i]).to(device)
+                    # print(a_t.device, sqrt_one_minus_at.device)
+                    # print(latents.device, noise_pred.device)
                     pred_x0 = (latents - sqrt_one_minus_at * noise_pred) / a_t.sqrt()
                     # apply freedom guidance
                     if freedom_start > i >= freedom_end:
@@ -599,10 +598,16 @@ class StableDiffusionControlNetFreedomPipeline(
                         D_x0_t = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
                         # warping
                         warp_D_x0_t = F.grid_sample(D_x0_t, grid, align_corners=True)
+                        print('warp_D_x0_t', warp_D_x0_t.requires_grad)
+
                         residual = self.freedom_energy_guide.get_residual(warp_D_x0_t, reference_img)
-                        print(reference_img.requires_grad)
-                        print(residual.requires_grad)
+
+                        print('reference_img', reference_img.requires_grad)
+                        print('residual', residual.requires_grad)
+
                         norm = torch.linalg.norm(residual)
+                        print('norm', norm.requires_grad)
+                        print('latents', latents.requires_grad)
                         norm_grad = torch.autograd.grad(outputs=norm, inputs=latents)[0]
                         rho = (correction * correction).mean().sqrt().item() * guidance_scale
                         rho = rho / (norm_grad * norm_grad).mean().sqrt().item() * 0.08  # 0.08
@@ -617,7 +622,7 @@ class StableDiffusionControlNetFreedomPipeline(
                         x_prev = x_prev - rho * norm_grad.detach()
 
                     # repeat_noise = False가 들어감
-                    latents = beta_t.sqrt() * x_prev + (1 - beta_t).sqrt() * randn_tensor(latents.shape)
+                    latents = beta_t.sqrt() * x_prev + (1 - beta_t).sqrt() * randn_tensor(latents.shape, device=device)
 
                     # # 원래는 여기까지
                     # # compute the previous noisy sample x_t -> x_t-1
