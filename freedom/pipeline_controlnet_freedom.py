@@ -595,7 +595,7 @@ class StableDiffusionControlNetFreedomPipeline(
                     # apply freedom guidance
                     if freedom_start > i >= freedom_end:
                         # 이미지 얻고
-                        D_x0_t = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+                        D_x0_t = self.vae.decode(pred_x0 / self.vae.config.scaling_factor, return_dict=False)[0]
                         # warping
                         warp_D_x0_t = F.grid_sample(D_x0_t, grid, align_corners=True)
                         print('warp_D_x0_t', warp_D_x0_t.requires_grad)

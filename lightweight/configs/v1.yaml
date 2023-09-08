@@ -1,0 +1,16 @@
+coach:
+  target: core.coach.SimpleCoach
+  params:
+    model_config:
+      target: core.model.UNetV1
+      params:
+        image_size: 64
+        in_channels: 3
+        out_channels: 3
+    losses:
+      lpips_lambda : 0.1
+      ff_lambda : 0.2
+      
+training:
+  optimizer : adam
+  batch_size : 32
