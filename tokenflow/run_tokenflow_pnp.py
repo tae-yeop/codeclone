@@ -28,6 +28,43 @@ class TokenFlow(nn.Module):
 
         self.init_method(conv_injection_t=pnp_f_t, qk_injection=pnp_attn_t)
         
+        noisy_latents = self.scheduler.add_noise(self.latents, self.eps, self.scheduler.timesteps[0])
+        edited_frames = self.sample_loop(noisy_latents, torch.arange(self.config['n_frames']))
+
+        save_video(edited_frames, f'{self.config["output_path"]}/tokenflow_PnP_fps_10.mp4')
+        save_video(edited_frames, f'{self.config["output_path"]}/tokenflow_PnP_fps_20.mp4', fps=20)
+        save_video(edited_frames, f'{self.config["output_path"]}/tokenflow_PnP_fps_30.mp4', fps=30)
+
+
+
+
+
+    def sample_loop(self, x, indices):
+        os.makedirs(f'{self.config}')
+        for i, t in enumerate(self.scheduler.timesteps):
+            x = self.batched_denoise_step(x, t, indices)
+
+        decoded_latents = self.decode_latents(x)
+        for i in range(len(decoded_latents)):
+            T.ToPILImage()(decoded_latents[i]).save(f'{self.config["output_path"]}/img_ode/%05.png' % i)
+
+        return decoded_latents
+
+
+    @torch.autocast(dtype=torch.float16, device_type='cuda')
+    def batched_denoise_step(self, x, t, indicies):
+        batch_size = self.config['batch_size']
+        denoised_latents = []
+        pivotal_idx = torch.randint(batch_size, (len(x)//batch_size,)) + torch.arange(0, len(x), batch_size)
+
+        register_pivotal(self, True)
+        self.denoise_step(x[pivotal_idx], t, indices[pivotal_idx])
+        register_pivotal(self, False)
+
+
+        return denoised_latents
+
+
     def save_vae_recon(self):
         os.makedirs(f'{self.config["output_path"]}/vae_recon', exist_ok=True)
         decoded = self.decode_latents(self.latents)
