@@ -1,1 +1,0 @@
-https://github.com/nvlong21/Face_Recognize
